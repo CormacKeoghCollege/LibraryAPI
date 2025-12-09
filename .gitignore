@@ -1,0 +1,39 @@
+# .NET Core
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.dll
+*.pdb
+*.exe
+
+# Visual Studio
+.vs/
+.vscode/
+*.userprefs
+
+# Environment files
+appsettings.Development.json
+appsettings.Production.json
+*.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Migration files (optional - uncomment if you don't want to track them)
+# Migrations/
+
+# Secrets
+secrets.json

@@ -1,0 +1,30 @@
+**/.dockerignore
+**/.env
+**/.git
+**/.gitignore
+**/.vs
+**/.vscode
+**/bin
+**/obj
+**/Dockerfile*
+**/docker-compose*
+LICENSE
+README.md
+apprunner.yaml
+version: 1.0
+runtime: docker
+build:
+  commands:
+    build:
+      - echo "Building the Docker image..."
+run:
+  runtime-version: latest
+  command: dotnet LibraryAPI.dll
+  network:
+    port: 8080
+    env: PORT
+  env:
+    - name: ASPNETCORE_ENVIRONMENT
+      value: "Production"
+    - name: ASPNETCORE_URLS
+      value: "http://0.0.0.0:8080"
