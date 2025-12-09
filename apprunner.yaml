@@ -8,8 +8,6 @@ run:
   command: dotnet LibraryAPI.dll
   network:
     port: 8080
-    env: PORT
-  env:
 env:
     - name: ASPNETCORE_ENVIRONMENT
       value: "Production"
