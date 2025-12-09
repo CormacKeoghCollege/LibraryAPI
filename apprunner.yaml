@@ -11,7 +11,14 @@ run:
     port: 8080
     env: PORT
   env:
+env:
     - name: ASPNETCORE_ENVIRONMENT
       value: "Production"
     - name: ASPNETCORE_URLS
       value: "http://0.0.0.0:8080"
+    - name: AWS_DEFAULT_REGION
+      value: "eu-west-1"
+    # Note: Don't put sensitive values like passwords here
+    # Use Secrets Manager or add them via console
+
+
