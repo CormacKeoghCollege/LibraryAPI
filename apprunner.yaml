@@ -5,7 +5,6 @@ build:
     build:
       - echo "Building the Docker image..."
 run:
-  runtime-version: latest
   command: dotnet LibraryAPI.dll
   network:
     port: 8080
