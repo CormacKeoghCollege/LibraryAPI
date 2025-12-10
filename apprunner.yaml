@@ -4,12 +4,10 @@ build:
   commands:
     build:
       - dotnet restore
-      - dotnet build --configuration Release
-    post-build:
-      - dotnet publish --configuration Release --output ./app
+      - dotnet build --configuration Release --output ./build
 run:
-  runtime-version: 8.0
-  command: dotnet ./app/LibraryAPI.dll
+  runtime-version: '8'
+  command: dotnet ./build/LibraryAPI.dll
   network:
     port: 8080
   env:
