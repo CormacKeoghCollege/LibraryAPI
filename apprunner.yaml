@@ -3,11 +3,14 @@ runtime: dotnet
 build:
   commands:
     build:
+      - echo "Starting restore..."
       - dotnet restore
-      - dotnet build --configuration Release --output ./build
+      - echo "Starting build..."
+      - dotnet build --configuration Release --verbosity normal
+      - echo "Build completed"
 run:
-  runtime-version: '8'
-  command: dotnet ./build/LibraryAPI.dll
+  runtime-version: 6
+  command: dotnet LibraryAPI2.dll
   network:
     port: 8080
   env:
