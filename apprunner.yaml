@@ -3,11 +3,7 @@ runtime: dotnet6
 build:
   commands:
     build:
-      - echo "Starting restore..."
-      - dotnet restore
-      - echo "Starting build..."
       - dotnet build --configuration Release --verbosity normal
-      - echo "Build completed"
 run:
   runtime-version: 6.0
   command: dotnet bin/Release/net6.0/LibraryAPI2.dll
