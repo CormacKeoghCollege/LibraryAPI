@@ -10,7 +10,7 @@ build:
       - echo "Build completed"
 run:
   runtime-version: 6
-  command: dotnet LibraryAPI2.dll
+  command: dotnet bin/Release/net6.0/LibraryAPI2.dll
   network:
     port: 8080
   env:
