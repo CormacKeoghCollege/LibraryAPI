@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Library Management API
+Resources:
+  LibraryApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: LibraryApiFunction
+      Handler: LibraryAPI2::LibraryAPI2.LambdaEntryPoint::FunctionHandlerAsync
+      Runtime: dotnet8
+      MemorySize: 512
+      Timeout: 30
+      Policies:
+      - AWSSecretsManagerGetSecretValuePolicy:
+          SecretArn: arn:aws:secretsmanager:eu-west-1:460977088120:secret:dev/library/database-GehcuG
+      - AWSSecretsManagerGetSecretValuePolicy:
+          SecretArn: arn:aws:secretsmanager:eu-west-1:460977088120:secret:dev/library/JWTSecret-JtLuFW
+      Environment:
+        Variables:
+          DATABASE_CONNECTION_STRING:
+            Fn::Sub: '{{resolve:secretsmanager:dev/library/database:SecretString}}'
+          JWT_KEY:
+            Fn::Sub: '{{resolve:secretsmanager:dev/library/JWTSecret:SecretString}}'
+          Jwt__Key:
+            Fn::Sub: '{{resolve:secretsmanager:dev/library/JWTSecret:SecretString}}'
+          Jwt__Issuer: LibraryAPI2
+          Jwt__Audience: LibraryAPI2
+      Events:
+        ProxyResource:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        RootResource:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+    Metadata:
+      SamResourceId: LibraryApiFunction
+Outputs:
+  LibraryApiUrl:
+    Description: API Gateway endpoint URL
+    Value:
+      Fn::Sub: https://{ServerlessRestApi}.execute-api.{AWS::Region}.amazonaws.com/Prod/

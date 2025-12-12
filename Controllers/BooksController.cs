@@ -1,11 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using LibraryAPI.Data;
-using LibraryAPI.Models;
-using LibraryAPI.DTOs;
+using LibraryAPI2.Data;
+using LibraryAPI2.Models;
+using LibraryAPI2.DTOs;
 
-namespace LibraryAPI.Controllers
+namespace LibraryAPI2.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]

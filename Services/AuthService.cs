@@ -3,9 +3,9 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-using LibraryAPI.Models;
+using LibraryAPI2.Models;
 
-namespace LibraryAPI.Services
+namespace LibraryAPI2.Services
 {
     public class AuthService
     {

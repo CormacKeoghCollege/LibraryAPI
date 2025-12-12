@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace LibraryAPI.DTOs
+namespace LibraryAPI2.DTOs
 {
     public class BookDto
     {

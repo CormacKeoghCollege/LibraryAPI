@@ -1,10 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using LibraryAPI.Data;
-using LibraryAPI.DTOs;
-using LibraryAPI.Services;
+using LibraryAPI2.Data;
+using LibraryAPI2.DTOs;
+using LibraryAPI2.Services;
 
-namespace LibraryAPI.Controllers
+namespace LibraryAPI2.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]

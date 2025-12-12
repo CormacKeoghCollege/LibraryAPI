@@ -2,7 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
 
-namespace LibraryAPI.Data
+namespace LibraryAPI2.Data
 {
     public class LibraryContextFactory : IDesignTimeDbContextFactory<LibraryContext>
     {

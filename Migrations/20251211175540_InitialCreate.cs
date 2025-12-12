@@ -3,7 +3,9 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace LibraryAPI.Migrations
+#pragma warning disable CA1814 // Prefer jagged arrays over multidimensional
+
+namespace LibraryAPI2.Migrations
 {
     /// <inheritdoc />
     public partial class InitialCreate : Migration
@@ -34,11 +36,30 @@ namespace LibraryAPI.Migrations
                         .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
                     Email = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
                     Password = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
-                    Role = table.Column<string>(type: "text", nullable: false)
+                    Role = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false)
                 },
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_Users", x => x.Id);
+                });
+
+            migrationBuilder.InsertData(
+                table: "Books",
+                columns: new[] { "Id", "Author", "IsAvailable", "Title" },
+                values: new object[,]
+                {
+                    { 1, "F. Scott Fitzgerald", true, "The Great Gatsby" },
+                    { 2, "Robert Martin", true, "Clean Code" }
+                });
+
+            migrationBuilder.InsertData(
+                table: "Users",
+                columns: new[] { "Id", "Email", "Password", "Role" },
+                values: new object[,]
+                {
+                    { 1, "admin@library.com", "admin123", "Admin" },
+                    { 2, "librarian@library.com", "lib123", "Librarian" },
+                    { 3, "member@library.com", "mem123", "Member" }
                 });
 
             migrationBuilder.CreateIndex(
