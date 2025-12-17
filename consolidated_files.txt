@@ -1,0 +1,1308 @@
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\LambdaEntryPoint.cs 
+=============================================================================== 
+using Amazon.Lambda.AspNetCoreServer;
+
+namespace LibraryAPI2;
+
+public class LambdaEntryPoint : APIGatewayProxyFunction
+{
+    protected override void Init(IWebHostBuilder builder)
+    {
+        builder.UseStartup<Startup>();
+    }
+} 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Program.cs 
+=============================================================================== 
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using LibraryAPI2.Data;
+using LibraryAPI2.Services;
+using LibraryAPI2.Models;
+using Amazon.SecretsManager;
+using Amazon.Extensions.NETCore.Setup;
+using Microsoft.OpenApi.Models;
+
+
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Configure for AWS App Runner
+builder.WebHost.UseUrls("http://0.0.0.0:8080");
+
+// Add AWS Services
+builder.Services.AddAWSService<IAmazonSecretsManager>();
+
+builder.Services.AddControllers();
+
+// Database Configuration
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<LibraryContext>(options =>
+    options.UseNpgsql(connectionString));
+
+// Add Services
+// No scoped services to register here; remove invalid AddScoped call.
+
+// JWT Configuration
+var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("JWT Key not configured");
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+        };
+    });
+
+// Authorization Policies
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+    options.AddPolicy("LibrarianOrAdmin", policy => policy.RequireRole("Librarian", "Admin"));
+});
+
+// Health Checks
+builder.Services.AddHealthChecks().AddNpgSql(connectionString!);
+
+// Swagger
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Description = "Enter 'Bearer' followed by your token",
+        Name = "Authorization",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey
+    });
+    
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            new string[] {}
+        }
+    });
+});
+
+var app = builder.Build();
+
+// Configure pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapHealthChecks("/health");
+app.MapControllers();
+
+// Database initialization
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<LibraryContext>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    
+    try
+    {
+        context.Database.Migrate();
+        await SeedDatabase(context, logger);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Database initialization failed");
+        throw;
+    }
+}
+
+app.Run();
+
+static async Task SeedDatabase(LibraryContext context, ILogger logger)
+{
+    if (!await context.Users.AnyAsync())
+    {
+        logger.LogInformation("Seeding initial data...");
+        
+        var users = new[]
+        {
+            new User { Email = "admin@library.com", Password = AuthService.HashPassword("SecureAdmin123!"), Role = "Admin" },
+            new User { Email = "librarian@library.com", Password = AuthService.HashPassword("SecureLib123!"), Role = "Librarian" },
+            new User { Email = "member@library.com", Password = AuthService.HashPassword("SecureMem123!"), Role = "Member" }
+        };
+
+        context.Users.AddRange(users);
+
+        var books = new[]
+        {
+            new Book { Title = "The Great Gatsby", Author = "F. Scott Fitzgerald", IsAvailable = true },
+            new Book { Title = "Clean Code", Author = "Robert Martin", IsAvailable = true }
+        };
+
+        context.Books.AddRange(books);
+        await context.SaveChangesAsync();
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Startup.cs 
+=============================================================================== 
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using LibraryAPI2.Data;
+using LibraryAPI2.Services;
+using Microsoft.AspNetCore.Authentication;
+
+namespace LibraryAPI2;
+
+public class Startup
+{
+    public IConfiguration Configuration { get; }
+
+    public Startup(IConfiguration configuration)
+    {
+        Configuration = configuration;
+    }
+
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.AddControllers();
+        
+           // Add logging first
+        services.AddLogging();
+
+        // Check if running on Lambda
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+        
+    if (isLambda)
+    {
+        // For Lambda: read from environment variable set by template.yaml
+        var connectionString = Environment.GetEnvironmentVariable("DATABASE_CONNECTION_STRING");
+
+ // Create temporary logger for debugging
+        using var loggerFactory = LoggerFactory.Create(builder => 
+        {
+            builder.AddConsole();
+            builder.SetMinimumLevel(LogLevel.Information);
+        });
+        var logger = loggerFactory.CreateLogger<Startup>();
+        
+        // Log the full connection string (be careful in production!)
+        logger.LogInformation("Connection string: '{ConnectionString}'", connectionString);
+        logger.LogInformation("Connection string length: {Length}", connectionString?.Length ?? 0);
+        
+        // Log individual environment variables for debugging
+        logger.LogInformation("DATABASE_CONNECTION_STRING env var: '{DbEnvVar}'", Environment.GetEnvironmentVariable("DATABASE_CONNECTION_STRING"));
+        logger.LogInformation("PostgreSQL config value: '{PostgreSqlConfig}'", Configuration.GetConnectionString("PostgreSQL"));
+        
+        if (string.IsNullOrEmpty(connectionString))
+        {
+            logger.LogError("Connection string is null or empty!");
+            throw new InvalidOperationException("Database connection string not found");
+        }
+        
+
+        
+        Console.WriteLine("Lambda - Connection string found: {!string.IsNullOrEmpty(connectionString)}");
+        Console.WriteLine("Lambda - Connection string length: {connectionString?.Length}");
+        
+        if (string.IsNullOrEmpty(connectionString))
+        {
+            throw new InvalidOperationException("DATABASE_CONNECTION_STRING environment variable not found in Lambda!");
+        }
+        
+        services.AddDbContext<LibraryContext>(options =>
+            options.UseNpgsql(connectionString));
+    }
+    else
+    {
+        // For local development: read from appsettings.json
+        var connectionString = Configuration.GetConnectionString("PostgreSQL");
+        
+        if (!string.IsNullOrEmpty(connectionString))
+        {
+            services.AddDbContext<LibraryContext>(options =>
+                options.UseNpgsql(connectionString));
+        }
+        else
+        {
+            // Fallback to in-memory for local development
+         //   services.AddDbContext<LibraryContext>(options =>
+          //      options.UseInMemoryDatabase("LibraryDB"));
+        }
+    }
+
+
+        // Add Authentication Service
+        services.AddScoped<IAuthenticationService, AuthenticationService>();
+
+        // Configure JWT Authentication
+        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                var jwtKey = Configuration["Jwt:Key"] ?? throw new InvalidOperationException("JWT key not configured (Jwt:Key).");
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = Configuration["Jwt:Issuer"],
+                    ValidAudience = Configuration["Jwt:Audience"],
+                    IssuerSigningKey = new SymmetricSecurityKey(
+                        Encoding.UTF8.GetBytes(jwtKey))
+                };
+            });
+
+        // Add Authorization Policies
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+            options.AddPolicy("LibrarianOrAdmin", policy => 
+                policy.RequireRole("Librarian", "Admin"));
+        });
+
+        // Add Swagger (only for local development)
+        if (!isLambda)
+        {
+            services.AddEndpointsApiExplorer();
+            services.AddSwaggerGen(c =>
+            {
+                c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+                {
+                    Description = "Enter 'Bearer' followed by your token",
+                    Name = "Authorization",
+                    In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+                    Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey
+                });
+                
+
+                c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+                {
+                    {
+                        new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+                        {
+                            Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                            {
+                                Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                                Id = "Bearer"
+                            }
+                        },
+                        new string[] {}
+                    }
+                });
+            });
+        }
+    }
+
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    {
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+
+        // Configure pipeline
+        if (env.IsDevelopment() && !isLambda)
+        {
+            app.UseSwagger();
+            app.UseSwaggerUI();
+        }
+
+        if (!isLambda)
+        {
+            app.UseHttpsRedirection();
+        }
+
+        app.UseAuthentication();
+        app.UseRouting();
+        app.UseAuthorization();
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapControllers();
+        });
+
+        // Initialize database with sample data (only for non-Lambda)
+        if (!isLambda)
+        {
+            using var scope = app.ApplicationServices.CreateScope();
+            var context = scope.ServiceProvider.GetRequiredService<LibraryContext>();
+            context.Database.EnsureCreated();
+        }
+    }
+} 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\appsettings.Development.json 
+=============================================================================== 
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=library-postgres-db3.cpreqcekdcmz.eu-west-1.rds.amazonaws.com;Database=LibraryDB;Username=libraryuser;Password=LibrarySecure123!;Port=5432;Trust Server Certificate=true;"
+  },
+  "Jwt": {
+    "Key": "YourSuperSecureJWTKeyThatIsAtLeast32CharactersLongForDevelopment123!",
+    "Issuer": "LibraryAPI",
+    "Audience": "LibraryAPI"
+  }
+
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\appsettings.json 
+=============================================================================== 
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+    "ConnectionStrings": {
+    "DefaultConnection": "Host=library-postgres-db3.cpreqcekdcmz.eu-west-1.rds.amazonaws.com;Database=LibraryDB;Username=libraryuser;Password=LibrarySecure123!;Port=5432;Trust Server Certificate=true;"
+  },
+  "Jwt": {
+    "Key": "YourSuperSecureJWTKeyThatIsAtLeast32CharactersLongForDevelopment123!",
+    "Issuer": "LibraryAPI",
+    "Audience": "LibraryAPI"
+  },
+  "AllowedHosts": "*"
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\aws-lambda-tools-defaults.json 
+=============================================================================== 
+{
+  "Information": [
+    "This file provides default values for the deployment wizard inside Visual Studio and the AWS Lambda commands added to the .NET Core CLI.",
+    "To learn more about the Lambda commands with the .NET Core CLI execute the following command at the command line in the project root directory.",
+    "dotnet lambda help",
+    "All the command line options for the Lambda command can be specified in this file."
+  ],
+  "profile": "",
+  "region": "eu-west-1",
+  "configuration": "Release",
+  "function-runtime": "dotnet8",
+  "function-memory-size": 512,
+  "function-timeout": 30,
+  "function-handler": "LibraryAPI2::LibraryAPI2.LambdaEntryPoint::FunctionHandlerAsync"
+} 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\migration.sql 
+=============================================================================== 
+﻿CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
+    "MigrationId" character varying(150) NOT NULL,
+    "ProductVersion" character varying(32) NOT NULL,
+    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+);
+
+START TRANSACTION;
+CREATE TABLE "Books" (
+    "Id" integer GENERATED BY DEFAULT AS IDENTITY,
+    "Title" character varying(200) NOT NULL,
+    "Author" character varying(200) NOT NULL,
+    "IsAvailable" boolean NOT NULL,
+    CONSTRAINT "PK_Books" PRIMARY KEY ("Id")
+);
+
+CREATE TABLE "Users" (
+    "Id" integer GENERATED BY DEFAULT AS IDENTITY,
+    "Email" character varying(100) NOT NULL,
+    "Password" character varying(255) NOT NULL,
+    "Role" text NOT NULL,
+    CONSTRAINT "PK_Users" PRIMARY KEY ("Id")
+);
+
+CREATE UNIQUE INDEX "IX_Users_Email" ON "Users" ("Email");
+
+INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+VALUES ('20251202200604_InitialCreate', '9.0.0');
+
+COMMIT;
+
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\template.yaml 
+=============================================================================== 
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Library Management API
+
+#Parameters:   Uncommenting these lines will pull the DB connection string and JWTKey from appsettings.json 
+#  DatabaseConnectionString:
+#    Type: String
+#    Description: PostgreSQL connection string
+#    NoEcho: true
+#  JwtKey:
+#    Type: String
+#    Description: JWT signing key
+#    NoEcho: true
+
+Resources:
+  LibraryApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: LibraryAPI2::LibraryAPI2.LambdaEntryPoint::FunctionHandlerAsync
+      Runtime: dotnet8
+      MemorySize: 512
+      Timeout: 30
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: arn:aws:secretsmanager:eu-west-1:460977088120:secret:dev/library/database-GehcuG
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: arn:aws:secretsmanager:eu-west-1:460977088120:secret:dev/library/JWTSecret-JtLuFW
+      Environment:
+        Variables:
+          DATABASE_CONNECTION_STRING: !Sub '{{resolve:secretsmanager:dev/library/database:SecretString}}'
+          JWT_KEY: !Sub '{{resolve:secretsmanager:dev/library/JWTSecret:SecretString}}'
+          Jwt__Key: !Sub '{{resolve:secretsmanager:dev/library/JWTSecret:SecretString}}'
+          Jwt__Issuer: LibraryAPI2
+          Jwt__Audience: LibraryAPI2
+      Events:
+        ProxyResource:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        RootResource:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+
+Outputs:
+  LibraryApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://{ServerlessRestApi}.execute-api.{AWS::Region}.amazonaws.com/Prod/" 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Controllers\AuthController.cs 
+=============================================================================== 
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using LibraryAPI2.Data;
+using LibraryAPI2.DTOs;
+using LibraryAPI2.Services;
+
+namespace LibraryAPI2.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class AuthController : ControllerBase
+    {
+        private readonly LibraryContext _context;
+        private readonly AuthService _authService;
+
+        public AuthController(LibraryContext context, AuthService authService)
+        {
+            _context = context;
+            _authService = authService;
+        }
+
+        [HttpPost("login")]
+        public async Task<ActionResult<AuthResponseDto>> Login(LoginDto loginDto)
+        {
+            var user = await _context.Users
+                .FirstOrDefaultAsync(u => u.Email == loginDto.Email);
+
+            if (user == null || !AuthService.VerifyPassword(loginDto.Password, user.Password))
+            {
+                return Unauthorized("Invalid email or password");
+            }
+
+            var token = _authService.GenerateToken(user);
+
+            return Ok(new AuthResponseDto
+            {
+                Token = token,
+                Email = user.Email,
+                Role = user.Role
+            });
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Controllers\BooksController.cs 
+=============================================================================== 
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using LibraryAPI2.Data;
+using LibraryAPI2.Models;
+using LibraryAPI2.DTOs;
+
+namespace LibraryAPI2.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [Authorize]
+    public class BooksController : ControllerBase
+    {
+        private readonly LibraryContext _context;
+
+        public BooksController(LibraryContext context)
+        {
+            _context = context;
+        }
+
+        [HttpGet]
+        [AllowAnonymous]
+        public async Task<ActionResult<IEnumerable<BookDto>>> GetBooks()
+        {
+            var books = await _context.Books
+                .Select(b => new BookDto
+                {
+                    Id = b.Id,
+                    Title = b.Title,
+                    Author = b.Author,
+                    IsAvailable = b.IsAvailable
+                })
+                .ToListAsync();
+
+            return Ok(books);
+        }
+
+        [HttpGet("{id}")]
+        [AllowAnonymous]
+        public async Task<ActionResult<BookDto>> GetBook(int id)
+        {
+            var book = await _context.Books.FindAsync(id);
+            if (book == null) return NotFound();
+
+            return Ok(new BookDto
+            {
+                Id = book.Id,
+                Title = book.Title,
+                Author = book.Author,
+                IsAvailable = book.IsAvailable
+            });
+        }
+
+        [HttpPost]
+        [Authorize(Policy = "LibrarianOrAdmin")]
+        public async Task<ActionResult<BookDto>> CreateBook(CreateBookDto createBookDto)
+        {
+            var book = new Book
+            {
+                Title = createBookDto.Title,
+                Author = createBookDto.Author,
+                IsAvailable = true
+            };
+
+            _context.Books.Add(book);
+            await _context.SaveChangesAsync();
+
+            var bookDto = new BookDto
+            {
+                Id = book.Id,
+                Title = book.Title,
+                Author = book.Author,
+                IsAvailable = book.IsAvailable
+            };
+
+            return CreatedAtAction(nameof(GetBook), new { id = book.Id }, bookDto);
+        }
+
+        [HttpPut("{id}")]
+        [Authorize(Policy = "LibrarianOrAdmin")]
+        public async Task<IActionResult> UpdateBook(int id, UpdateBookDto updateBookDto)
+        {
+            var book = await _context.Books.FindAsync(id);
+            if (book == null) return NotFound();
+
+            if (!string.IsNullOrEmpty(updateBookDto.Title))
+                book.Title = updateBookDto.Title;
+            if (!string.IsNullOrEmpty(updateBookDto.Author))
+                book.Author = updateBookDto.Author;
+            if (updateBookDto.IsAvailable.HasValue)
+                book.IsAvailable = updateBookDto.IsAvailable.Value;
+
+            await _context.SaveChangesAsync();
+            return NoContent();
+        }
+
+        [HttpDelete("{id}")]
+        [Authorize(Policy = "AdminOnly")]
+        public async Task<IActionResult> DeleteBook(int id)
+        {
+            var book = await _context.Books.FindAsync(id);
+            if (book == null) return NotFound();
+
+            _context.Books.Remove(book);
+            await _context.SaveChangesAsync();
+            return NoContent();
+        }
+
+        [HttpPost("{id}/checkout")]
+        public async Task<IActionResult> CheckoutBook(int id)
+        {
+            var book = await _context.Books.FindAsync(id);
+            if (book == null) return NotFound();
+            if (!book.IsAvailable) return BadRequest("Book already checked out");
+
+            book.IsAvailable = false;
+            await _context.SaveChangesAsync();
+            return Ok(new { message = $"Book '{book.Title}' checked out successfully" });
+        }
+
+        [HttpPost("{id}/checkin")]
+        public async Task<IActionResult> CheckinBook(int id)
+        {
+            var book = await _context.Books.FindAsync(id);
+            if (book == null) return NotFound();
+            if (book.IsAvailable) return BadRequest("Book already available");
+
+            book.IsAvailable = true;
+            await _context.SaveChangesAsync();
+            return Ok(new { message = "Book '{book.Title}' checked in successfully" });
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Data\LibraryContext.cs 
+=============================================================================== 
+using Microsoft.EntityFrameworkCore;
+using LibraryAPI2.Models;
+
+namespace LibraryAPI2.Data
+{
+    public class LibraryContext : DbContext
+    {
+        public LibraryContext(DbContextOptions<LibraryContext> options) : base(options) { }
+        
+        public DbSet<Book> Books { get; set; } = null!;
+        public DbSet<User> Users { get; set; } = null!;
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<Book>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Title).IsRequired().HasMaxLength(200);
+                entity.Property(e => e.Author).IsRequired().HasMaxLength(200);
+            });
+
+            modelBuilder.Entity<User>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Email).IsRequired().HasMaxLength(100);
+                entity.Property(e => e.Password).IsRequired().HasMaxLength(255);
+                entity.HasIndex(e => e.Email).IsUnique();
+                entity.Property(e => e.Role).HasMaxLength(20);
+            });
+
+
+ // Only seed data for in-memory database (local development)
+            var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+            if (!isLambda)
+            {
+                // Sample books
+                modelBuilder.Entity<Book>(entity => entity.HasData(
+                    new Book { Id = 1, Title = "The Great Gatsby", Author = "F. Scott Fitzgerald" },
+                    new Book { Id = 2, Title = "Clean Code", Author = "Robert Martin" }
+                ));
+
+                // Sample users (in real apps, hash passwords!)
+                modelBuilder.Entity<User>(entity => entity.HasData(
+                    new User { Id = 1, Email = "admin@library.com", Password = "admin123", Role = "Admin" },
+                    new User { Id = 2, Email = "librarian@library.com", Password = "lib123", Role = "Librarian" },
+                    new User { Id = 3, Email = "member@library.com", Password = "mem123", Role = "Member" }
+                ));
+            }
+
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Data\LibraryContextFactory.cs 
+=============================================================================== 
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.Extensions.Configuration;
+
+namespace LibraryAPI2.Data
+{
+    public class LibraryContextFactory : IDesignTimeDbContextFactory<LibraryContext>
+    {
+        public LibraryContext CreateDbContext(string[] args)
+        {
+            // Build configuration
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: false)
+                .AddJsonFile("appsettings.Development.json", optional: true)
+                .Build();
+
+            // Get connection string
+            var connectionString = configuration.GetConnectionString("DefaultConnection");
+
+            // Build DbContext
+            var optionsBuilder = new DbContextOptionsBuilder<LibraryContext>();
+            optionsBuilder.UseNpgsql(connectionString);
+
+            return new LibraryContext(optionsBuilder.Options);
+        }
+    }
+} 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\DTOs\BookDto.cs 
+=============================================================================== 
+using System.ComponentModel.DataAnnotations;
+
+namespace LibraryAPI2.DTOs
+{
+    public class BookDto
+    {
+        public int Id { get; set; }
+        public string Title { get; set; } = string.Empty;
+        public string Author { get; set; } = string.Empty;
+        public bool IsAvailable { get; set; }
+    }
+
+    public class CreateBookDto
+    {
+        [Required]
+        public string Title { get; set; } = string.Empty;
+        [Required]
+        public string Author { get; set; } = string.Empty;
+    }
+
+    public class UpdateBookDto
+    {
+        public string? Title { get; set; }
+        public string? Author { get; set; }
+        public bool? IsAvailable { get; set; }
+    }
+
+    public class LoginDto
+    {
+        [Required]
+        public string Email { get; set; } = string.Empty;
+        [Required]
+        public string Password { get; set; } = string.Empty;
+    }
+
+    public class AuthResponseDto
+    {
+        public string Token { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Migrations\20251211175540_InitialCreate.cs 
+=============================================================================== 
+﻿using Microsoft.EntityFrameworkCore.Migrations;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+#pragma warning disable CA1814 // Prefer jagged arrays over multidimensional
+
+namespace LibraryAPI2.Migrations
+{
+    /// <inheritdoc />
+    public partial class InitialCreate : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.CreateTable(
+                name: "Books",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    Title = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    Author = table.Column<string>(type: "character varying(200)", maxLength: 200, nullable: false),
+                    IsAvailable = table.Column<bool>(type: "boolean", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Books", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "Users",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    Email = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: false),
+                    Password = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
+                    Role = table.Column<string>(type: "character varying(20)", maxLength: 20, nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Users", x => x.Id);
+                });
+
+            migrationBuilder.InsertData(
+                table: "Books",
+                columns: new[] { "Id", "Author", "IsAvailable", "Title" },
+                values: new object[,]
+                {
+                    { 1, "F. Scott Fitzgerald", true, "The Great Gatsby" },
+                    { 2, "Robert Martin", true, "Clean Code" }
+                });
+
+            migrationBuilder.InsertData(
+                table: "Users",
+                columns: new[] { "Id", "Email", "Password", "Role" },
+                values: new object[,]
+                {
+                    { 1, "admin@library.com", "admin123", "Admin" },
+                    { 2, "librarian@library.com", "lib123", "Librarian" },
+                    { 3, "member@library.com", "mem123", "Member" }
+                });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Users_Email",
+                table: "Users",
+                column: "Email",
+                unique: true);
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropTable(
+                name: "Books");
+
+            migrationBuilder.DropTable(
+                name: "Users");
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Migrations\20251211175540_InitialCreate.Designer.cs 
+=============================================================================== 
+﻿// <auto-generated />
+using LibraryAPI2.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+namespace LibraryAPI2.Migrations
+{
+    [DbContext(typeof(LibraryContext))]
+    [Migration("20251211175540_InitialCreate")]
+    partial class InitialCreate
+    {
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "8.0.4")
+                .HasAnnotation("Relational:MaxIdentifierLength", 63);
+
+            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("LibraryAPI2.Models.Book", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Author")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<bool>("IsAvailable")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Books");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Author = "F. Scott Fitzgerald",
+                            IsAvailable = true,
+                            Title = "The Great Gatsby"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Author = "Robert Martin",
+                            IsAvailable = true,
+                            Title = "Clean Code"
+                        });
+                });
+
+            modelBuilder.Entity("LibraryAPI2.Models.User", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Password")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Email")
+                        .IsUnique();
+
+                    b.ToTable("Users");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Email = "admin@library.com",
+                            Password = "admin123",
+                            Role = "Admin"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Email = "librarian@library.com",
+                            Password = "lib123",
+                            Role = "Librarian"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Email = "member@library.com",
+                            Password = "mem123",
+                            Role = "Member"
+                        });
+                });
+#pragma warning restore 612, 618
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Migrations\LibraryContextModelSnapshot.cs 
+=============================================================================== 
+﻿// <auto-generated />
+using LibraryAPI2.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+namespace LibraryAPI2.Migrations
+{
+    [DbContext(typeof(LibraryContext))]
+    partial class LibraryContextModelSnapshot : ModelSnapshot
+    {
+        protected override void BuildModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "8.0.4")
+                .HasAnnotation("Relational:MaxIdentifierLength", 63);
+
+            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("LibraryAPI2.Models.Book", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Author")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<bool>("IsAvailable")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Books");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Author = "F. Scott Fitzgerald",
+                            IsAvailable = true,
+                            Title = "The Great Gatsby"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Author = "Robert Martin",
+                            IsAvailable = true,
+                            Title = "Clean Code"
+                        });
+                });
+
+            modelBuilder.Entity("LibraryAPI2.Models.User", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Password")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Email")
+                        .IsUnique();
+
+                    b.ToTable("Users");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Email = "admin@library.com",
+                            Password = "admin123",
+                            Role = "Admin"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Email = "librarian@library.com",
+                            Password = "lib123",
+                            Role = "Librarian"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Email = "member@library.com",
+                            Password = "mem123",
+                            Role = "Member"
+                        });
+                });
+#pragma warning restore 612, 618
+        }
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Models\Book.cs 
+=============================================================================== 
+using System.ComponentModel.DataAnnotations;
+
+namespace LibraryAPI2.Models
+{
+    public class Book
+    {
+        public int Id { get; set; }
+        [Required]
+        public string Title { get; set; } = string.Empty;
+        [Required]
+        public string Author { get; set; } = string.Empty;
+        public bool IsAvailable { get; set; } = true;
+    }
+
+    public class User
+    {
+        public int Id { get; set; }
+        public string Email { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string Role { get; set; } = "Member";
+    }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Properties\launchSettings.json 
+=============================================================================== 
+﻿{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": false,
+      "applicationUrl": "http://localhost:5034",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    "https": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": false,
+      "applicationUrl": "https://localhost:7199;http://localhost:5034",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+ 
+ 
+=============================================================================== 
+C:\Users\cokeogh\Documents\LibraryAPI2\Services\AuthService.cs 
+=============================================================================== 
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using LibraryAPI2.Models;
+
+namespace LibraryAPI2.Services
+{
+    public class AuthService
+    {
+        private readonly IConfiguration _config;
+
+        public AuthService(IConfiguration config)
+        {
+            _config = config;
+        }
+
+        public string GenerateToken(User user)
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"]!));
+            var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var claims = new[]
+            {
+                new Claim(ClaimTypes.Email, user.Email),
+                new Claim(ClaimTypes.Role, user.Role),
+                new Claim("UserId", user.Id.ToString())
+            };
+
+            var token = new JwtSecurityToken(
+                issuer: _config["Jwt:Issuer"],
+                audience: _config["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.UtcNow.AddHours(24),
+                signingCredentials: credentials
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        public static string HashPassword(string password)
+        {
+            using var rng = RandomNumberGenerator.Create();
+            var salt = new byte[16];
+            rng.GetBytes(salt);
+            
+            using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
+            var hash = pbkdf2.GetBytes(32);
+            
+            var hashBytes = new byte[48];
+            Array.Copy(salt, 0, hashBytes, 0, 16);
+            Array.Copy(hash, 0, hashBytes, 16, 32);
+            
+            return Convert.ToBase64String(hashBytes);
+        }
+
+        public static bool VerifyPassword(string password, string hashedPassword)
+        {
+            var hashBytes = Convert.FromBase64String(hashedPassword);
+            var salt = new byte[16];
+            Array.Copy(hashBytes, 0, salt, 0, 16);
+            
+            using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
+            var hash = pbkdf2.GetBytes(32);
+            
+            for (int i = 0; i < 32; i++)
+            {
+                if (hashBytes[i + 16] != hash[i])
+                    return false;
+            }
+            return true;
+        }
+    }
+}
+ 
+ 
